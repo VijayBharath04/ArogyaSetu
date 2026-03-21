@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArogyaSetu Edge - Nurse Interaction Tool</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f4f6f9;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 500px;
+            width: 100%;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        h2 { text-align: center; color: #333; margin-top: 0; }
+        .video-container {
+            position: relative;
+            width: 100%;
+            height: 280px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror mode */
+        }
+        .badge {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            color: white;
+            font-size: 14px;
+            background: #6c757d;
+        }
+        .badge.low { background: #28a745; }
+        .badge.med { background: #ffc107; color: #333; }
+        .badge.high { background: #dc3545; }
+        
+        .metrics {
+            margin: 15px 0;
+            font-size: 14px;
+            color: #555;
+            background: #eef2f5;
+            padding: 10px;
+            border-radius: 6px;
+        }
+        textarea {
+            width: 100%;
+            height: 80px;
+            padding: 10px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            resize: none;
+            font-size: 15px;
+            margin-bottom: 15px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-bottom: 10px;
+            transition: background 0.2s;
+        }
+        .btn-speech { background-color: #007bff; color: white; }
+        .btn-speech.recording { background-color: #dc3545; }
+        .btn-send { background-color: #28a745; color: white; }
+        .status {
+            text-align: center;
+            font-size: 13px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>ArogyaSetu Mobile Node</h2>
+    
+    <div class="video-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <div id="distress-badge" class="badge">Initializing AI...</div>
+    </div>
+
+    <div class="metrics">
+        <strong>Live Metrics:</strong> <span id="heuristic-score">0.000</span>
+    </div>
+
+    <button id="speech-btn" class="btn-speech">🎙️ Record Symptom (Voice)</button>
+    
+    <textarea id="symptom-input" placeholder="Symptoms will appear here, or you can type manually..."></textarea>
+    
+    <button id="send-btn" class="btn-send">🚀 Send to Clinic Hub</button>
+    <div id="status-text" class="status"></div>
+</div>
+
+<script>
+    // ==========================================
+    // ⚙️ CONFIGURATION & TARGETS (Update these!)
+    // ==========================================
+    const SERVER_URL = "http://10.91.53.69:5000/ingest/mobile"; 
+    const SPEECH_LANG = "en-IN"; // Target local language configuration
+
+    // Distress Threshold Constants (Calibrate these in Phase 4)
+        const NORMAL_DIST = 0.0650;   
+        const FURROWED_DIST = 0.0580; 
+
+    // DOM Elements
+    const videoElement = document.getElementById('webcam');
+    const badge = document.getElementById('distress-badge');
+    const scoreDisplay = document.getElementById('heuristic-score');
+    const speechBtn = document.getElementById('speech-btn');
+    const symptomInput = document.getElementById('symptom-input');
+    const sendBtn = document.getElementById('send-btn');
+    const statusText = document.getElementById('status-text');
+
+    let currentDistressLevel = "LOW";
+    let isRecording = false;
+    let recognition;
+
+    // ==========================================
+    // 🧠 EDGE AI: ON-DEVICE FACE DISTRESS
+    // ==========================================
+    const faceMesh = new FaceMesh({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults((results) => {
+        if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+            badge.innerText = "No face detected";
+            badge.className = "badge";
+            return;
+        }
+
+        const landmarks = results.multiFaceLandmarks[0];
+        
+        // Target specific facial points to calculate structural distance
+        // Landmark 52: Right inner eyebrow top | Landmark 117: Right eye top
+        const eyebrow = landmarks[52];
+        const eye = landmarks[117];
+
+        // 3D Euclidean Distance calculation formula
+        const distance = Math.sqrt(
+            Math.pow(eyebrow.x - eye.x, 2) +
+            Math.pow(eyebrow.y - eye.y, 2) +
+            Math.pow(eyebrow.z - eye.z, 2)
+        );
+
+        scoreDisplay.innerText = distance.toFixed(4);
+
+        // Simple Heuristic mapping to operational categories
+        if (distance <= FURROWED_DIST) {
+            currentDistressLevel = "HIGH";
+            badge.innerText = "🛑 HIGH DISTRESS";
+            badge.className = "badge high";
+        } else if (distance < NORMAL_DIST && distance > FURROWED_DIST) {
+            currentDistressLevel = "MEDIUM";
+            badge.innerText = "⚠️ MED DISTRESS";
+            badge.className = "badge med";
+        } else {
+            currentDistressLevel = "LOW";
+            badge.innerText = "✅ LOW DISTRESS";
+            badge.className = "badge low";
+        }
+    });
+
+    // Initialize local device camera pipeline
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await faceMesh.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+    camera.start().catch(err => {
+        badge.innerText = "Camera Error";
+        console.error(err);
+    });
+
+    // ==========================================
+    // 🎙️ SPEECH-TO-TEXT PROCESSING
+    // ==========================================
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = SPEECH_LANG;
+
+        recognition.onstart = () => {
+            isRecording = true;
+            speechBtn.innerText = "🛑 Recording... Speak Now";
+            speechBtn.classList.add('recording');
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            symptomInput.value += (symptomInput.value ? " " : "") + transcript;
+        };
+
+        recognition.onerror = (err) => {
+            console.error("Speech Recognition Error:", err.error);
+            statusText.innerText = `Voice Error: ${err.error}`;
+            statusText.style.color = "red";
+        };
+
+        recognition.onend = () => {
+            isRecording = false;
+            speechBtn.innerText = "🎙️ Record Symptom (Voice)";
+            speechBtn.classList.remove('recording');
+        };
+
+        speechBtn.addEventListener('click', () => {
+            if (isRecording) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        });
+    } else {
+        speechBtn.innerText = "🎙️ Voice Typing Unsupported";
+        speechBtn.disabled = true;
+    }
+
+    // ==========================================
+    // 📤 DATA PIPELINE: BROADCAST PACKET
+    // ==========================================
+    sendBtn.addEventListener('click', async () => {
+        const payload = {
+            timestamp: new Date().toISOString(),
+            distress_level: currentDistressLevel,
+            symptoms: symptomInput.value.trim() || "No custom text added"
+        };
+
+        statusText.innerText = "Transmitting to Clinic Hub...";
+        statusText.style.color = "#007bff";
+
+        try {
+            const response = await fetch(SERVER_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                statusText.innerText = "🚀 Successfully Transmitted!";
+                statusText.style.color = "green";
+                symptomInput.value = ""; // Clear form after dispatch success
+            } else {
+                throw new Error(`Server returned status ${response.status}`);
+            }
+        } catch (error) {
+            console.error("Transmission Failure:", error);
+            statusText.innerText = "❌ Transmission Failed. Check Server Connection.";
+            statusText.style.color = "red";
+        }
+    });
+</script>
+</body>
+</html>
